@@ -43,13 +43,12 @@ dependencies {
     androidTestImplementation project(':SharedTestLib')
     androidTestImplementation 'androidx.test.ext:junit:1.1.3'
     androidTestImplementation "androidx.test:rules:1.4.0"
-
 }
 
 protobuf {
     // Configure the protoc executable
     protoc {
-        artifact = "com.google.protobuf:protoc:3.0.0${PROTO_ARCH_SUFFIX}"
+        artifact = "com.google.protobuf:protoc:${protobuf_version}${PROTO_ARCH_SUFFIX}"
         generateProtoTasks {
             all().each { task ->
                 task.builtins {
