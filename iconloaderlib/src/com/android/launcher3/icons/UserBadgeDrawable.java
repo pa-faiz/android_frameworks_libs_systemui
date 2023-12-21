@@ -46,7 +46,7 @@ public class UserBadgeDrawable extends DrawableWrapper {
     private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final int mBgColor;
-    private boolean mShouldDrawBackground = false;
+    private boolean mShouldDrawBackground = true;
 
     public UserBadgeDrawable(Context context, int badgeRes, boolean isThemed) {
         super(context.getDrawable(badgeRes));
@@ -70,18 +70,17 @@ public class UserBadgeDrawable extends DrawableWrapper {
     public void draw(@NonNull Canvas canvas) {
         if (mShouldDrawBackground) {
             Rect b = getBounds();
-            if (!b.isEmpty()) {
-                int saveCount = canvas.save();
-                canvas.scale(VIEWPORT_SIZE / b.width(), VIEWPORT_SIZE / b.height());
+            int saveCount = canvas.save();
+            canvas.translate(b.left, b.top);
+            canvas.scale(b.width() / VIEWPORT_SIZE, b.height() / VIEWPORT_SIZE);
 
-                mPaint.setColor(SHADOW_COLOR);
-                canvas.drawCircle(CENTER, CENTER + SHADOW_OFFSET_Y, SHADOW_RADIUS, mPaint);
+            mPaint.setColor(SHADOW_COLOR);
+            canvas.drawCircle(CENTER, CENTER + SHADOW_OFFSET_Y, SHADOW_RADIUS, mPaint);
 
-                mPaint.setColor(mBgColor);
-                canvas.drawCircle(CENTER, CENTER, BG_RADIUS, mPaint);
+            mPaint.setColor(mBgColor);
+            canvas.drawCircle(CENTER, CENTER, BG_RADIUS, mPaint);
 
-                canvas.restoreToCount(saveCount);
-            }
+            canvas.restoreToCount(saveCount);
         }
         super.draw(canvas);
     }
