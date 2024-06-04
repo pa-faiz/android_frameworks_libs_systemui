@@ -16,45 +16,39 @@
 
 package com.android.app.tracing.coroutines
 
-import com.android.app.tracing.beginSlice
-import com.android.app.tracing.endSlice
 import com.android.systemui.Flags.coroutineTracing
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CopyableThreadContextElement
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineName
+
+private const val DEBUG = false
+
+/** Log a message with a tag indicating the current thread ID */
+private inline fun debug(message: () -> String) {
+    if (DEBUG) println("Thread #${Thread.currentThread().id}: ${message()}")
+}
+
+/** Use a final subclass to avoid virtual calls (b/316642146). */
+@PublishedApi internal class TraceDataThreadLocal : ThreadLocal<TraceData?>()
 
 /**
  * Thread-local storage for giving each thread a unique [TraceData]. It can only be used when paired
  * with a [TraceContextElement].
  *
- * [CURRENT_TRACE] will be `null` if either 1) we aren't in a coroutine, or 2) the current coroutine
- * context does not have [TraceContextElement]. In both cases, writing to this thread-local would be
- * undefined behavior if it were not null, which is why we use null as the default value rather than
- * an empty TraceData.
+ * [traceThreadLocal] will be `null` if either 1) we aren't in a coroutine, or 2) the current
+ * coroutine context does not have [TraceContextElement]. In both cases, writing to this
+ * thread-local would be undefined behavior if it were not null, which is why we use null as the
+ * default value rather than an empty TraceData.
  *
  * @see traceCoroutine
  */
-internal val CURRENT_TRACE = ThreadLocal<TraceData?>()
-
-/**
- * If `true`, the CoroutineDispatcher and CoroutineName will be included in the trace each time the
- * coroutine context changes. This makes the trace extremely noisy, so it is off by default.
- */
-private const val DEBUG_COROUTINE_CONTEXT_UPDATES = false
+@PublishedApi internal val traceThreadLocal = TraceDataThreadLocal()
 
 /**
  * Returns a new [CoroutineContext] used for tracing. Used to hide internal implementation details.
  */
 fun createCoroutineTracingContext(): CoroutineContext {
-    return if (coroutineTracing()) TraceContextElement() else EmptyCoroutineContext
-}
-
-private fun CoroutineContext.nameForTrace(): String {
-    val dispatcherStr = "${this[CoroutineDispatcher]}"
-    val nameStr = "${this[CoroutineName]?.name}"
-    return "CoroutineDispatcher: $dispatcherStr; CoroutineName: $nameStr"
+    return if (coroutineTracing()) TraceContextElement(TraceData()) else EmptyCoroutineContext
 }
 
 /**
@@ -65,38 +59,99 @@ private fun CoroutineContext.nameForTrace(): String {
  *
  * @see traceCoroutine
  */
-@PublishedApi
-internal class TraceContextElement(@PublishedApi internal val traceData: TraceData = TraceData()) :
+internal class TraceContextElement(internal val traceData: TraceData? = TraceData()) :
     CopyableThreadContextElement<TraceData?> {
 
-    @PublishedApi internal companion object Key : CoroutineContext.Key<TraceContextElement>
+    internal companion object Key : CoroutineContext.Key<TraceContextElement>
 
     override val key: CoroutineContext.Key<*>
         get() = Key
 
+    init {
+        debug { "$this #init" }
+    }
+
+    /**
+     * This function is invoked before the coroutine is resumed on the current thread. When a
+     * multi-threaded dispatcher is used, calls to `updateThreadContext` may happen in parallel to
+     * the prior `restoreThreadContext` in the same context. However, calls to `updateThreadContext`
+     * will not run in parallel on the same context.
+     *
+     * ```
+     * Thread #1 | [updateThreadContext]....^              [restoreThreadContext]
+     * --------------------------------------------------------------------------------------------
+     * Thread #2 |                           [updateThreadContext]...........^[restoreThreadContext]
+     * ```
+     *
+     * (`...` indicate coroutine body is running; whitespace indicates the thread is not scheduled;
+     * `^` is a suspension point)
+     */
     override fun updateThreadContext(context: CoroutineContext): TraceData? {
-        val oldState = CURRENT_TRACE.get()
-        // oldState should never be null because we always initialize the thread-local with a
-        // non-null instance,
-        oldState?.endAllOnThread()
-        CURRENT_TRACE.set(traceData)
-        if (DEBUG_COROUTINE_CONTEXT_UPDATES) beginSlice(context.nameForTrace())
-        traceData.beginAllOnThread()
+        val oldState = traceThreadLocal.get()
+        debug { "$this #updateThreadContext oldState=$oldState" }
+        if (oldState !== traceData) {
+            traceThreadLocal.set(traceData)
+            // Calls to `updateThreadContext` will not happen in parallel on the same context, and
+            // they cannot happen before the prior suspension point. Additionally,
+            // `restoreThreadContext` does not modify `traceData`, so it is safe to iterate over the
+            // collection here:
+            traceData?.beginAllOnThread()
+        }
         return oldState
     }
 
+    /**
+     * This function is invoked after the coroutine has suspended on the current thread. When a
+     * multi-threaded dispatcher is used, calls to `restoreThreadContext` may happen in parallel to
+     * the subsequent `updateThreadContext` and `restoreThreadContext` operations. The coroutine
+     * body itself will not run in parallel, but `TraceData` could be modified by a coroutine body
+     * after the suspension point in parallel to `restoreThreadContext` associated with the
+     * coroutine body _prior_ to the suspension point.
+     *
+     * ```
+     * Thread #1 | [updateThreadContext].x..^              [restoreThreadContext]
+     * --------------------------------------------------------------------------------------------
+     * Thread #2 |                           [updateThreadContext]..x..x.....^[restoreThreadContext]
+     * ```
+     *
+     * OR
+     *
+     * ```
+     * Thread #1 |                                 [restoreThreadContext]
+     * --------------------------------------------------------------------------------------------
+     * Thread #2 |     [updateThreadContext]...x....x..^[restoreThreadContext]
+     * ```
+     *
+     * (`...` indicate coroutine body is running; whitespace indicates the thread is not scheduled;
+     * `^` is a suspension point; `x` are calls to modify the thread-local trace data)
+     *
+     * ```
+     */
     override fun restoreThreadContext(context: CoroutineContext, oldState: TraceData?) {
-        if (DEBUG_COROUTINE_CONTEXT_UPDATES) endSlice()
-        traceData.endAllOnThread()
-        CURRENT_TRACE.set(oldState)
-        oldState?.beginAllOnThread()
+        debug { "$this#restoreThreadContext restoring=$oldState" }
+        // We not use the `TraceData` object here because it may have been modified on another
+        // thread after the last suspension point. This is why we use a [TraceStateHolder]:
+        // so we can end the correct number of trace sections, restoring the thread to its state
+        // prior to the last call to [updateThreadContext].
+        if (oldState !== traceThreadLocal.get()) {
+            traceData?.endAllOnThread()
+            traceThreadLocal.set(oldState)
+        }
     }
 
     override fun copyForChild(): CopyableThreadContextElement<TraceData?> {
-        return TraceContextElement(traceData.clone())
+        debug { "$this #copyForChild" }
+        return TraceContextElement(traceData?.clone())
     }
 
     override fun mergeForChild(overwritingElement: CoroutineContext.Element): CoroutineContext {
-        return TraceContextElement(traceData.clone())
+        debug { "$this #mergeForChild" }
+        // For our use-case, we always give precedence to the parent trace context, and the
+        // child context (overwritingElement) is ignored
+        return TraceContextElement(traceData?.clone())
+    }
+
+    override fun toString(): String {
+        return "TraceContextElement@${hashCode().toHexString()}[$traceData]"
     }
 }

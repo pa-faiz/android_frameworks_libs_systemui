@@ -29,7 +29,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -168,7 +167,7 @@ suspend inline fun <T> withContext(
  * @see traceCoroutine
  */
 @OptIn(ExperimentalContracts::class)
-suspend inline fun <T> traceCoroutine(spanName: () -> String, block: () -> T): T {
+inline fun <T> traceCoroutine(spanName: () -> String, block: () -> T): T {
     contract {
         callsInPlace(spanName, InvocationKind.AT_MOST_ONCE)
         callsInPlace(block, InvocationKind.EXACTLY_ONCE)
@@ -177,12 +176,11 @@ suspend inline fun <T> traceCoroutine(spanName: () -> String, block: () -> T): T
     // For coroutine tracing to work, trace spans must be added and removed even when
     // tracing is not active (i.e. when TRACE_TAG_APP is disabled). Otherwise, when the
     // coroutine resumes when tracing is active, we won't know its name.
-    val tracer = currentCoroutineContext()[TraceContextElement]?.traceData
-
+    val traceData = traceThreadLocal.get()
     val asyncTracingEnabled = isEnabled()
-    val spanString = if (tracer != null || asyncTracingEnabled) spanName() else "<none>"
+    val spanString = if (traceData != null || asyncTracingEnabled) spanName() else "<none>"
 
-    tracer?.beginSpan(spanString)
+    traceData?.beginSpan(spanString)
 
     // Also trace to the "Coroutines" async track. This makes it easy to see the duration of
     // coroutine spans. When the coroutine_tracing flag is enabled, those same names will
@@ -193,10 +191,10 @@ suspend inline fun <T> traceCoroutine(spanName: () -> String, block: () -> T): T
         return block()
     } finally {
         if (asyncTracingEnabled) asyncTraceForTrackEnd(DEFAULT_TRACK_NAME, spanString, cookie)
-        tracer?.endSpan()
+        traceData?.endSpan()
     }
 }
 
 /** @see traceCoroutine */
-suspend inline fun <T> traceCoroutine(spanName: String, block: () -> T): T =
+inline fun <T> traceCoroutine(spanName: String, block: () -> T): T =
     traceCoroutine({ spanName }, block)
