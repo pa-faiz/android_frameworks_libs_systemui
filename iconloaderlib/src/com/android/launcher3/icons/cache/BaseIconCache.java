@@ -583,14 +583,24 @@ public abstract class BaseIconCache {
                             PackageManager.PackageInfoFlags.of(flags));
                     ApplicationInfo appInfo = info.applicationInfo;
                     if (appInfo == null) {
-                        throw new NameNotFoundException("ApplicationInfo is null");
+                        NameNotFoundException e = new NameNotFoundException(
+                                "ApplicationInfo is null");
+                        logdPersistently(TAG,
+                                String.format("ApplicationInfo is null for %s", packageName),
+                                e);
+                        throw e;
                     }
 
                     BaseIconFactory li = getIconFactory();
                     // Load the full res icon for the application, but if useLowResIcon is set, then
                     // only keep the low resolution icon instead of the larger full-sized icon
-                    BitmapInfo iconInfo = li.createBadgedIconBitmap(
-                            appInfo.loadIcon(mPackageManager),
+                    Drawable appIcon = appInfo.loadIcon(mPackageManager);
+                    if (mPackageManager.isDefaultApplicationIcon(appIcon)) {
+                        logdPersistently(TAG,
+                                String.format("Default icon returned for %s", packageName),
+                                null);
+                    }
+                    BitmapInfo iconInfo = li.createBadgedIconBitmap(appIcon,
                             new IconOptions().setUser(user).setInstantApp(isInstantApp(appInfo)));
                     li.close();
 
@@ -804,5 +814,10 @@ public abstract class BaseIconCache {
         if (Looper.myLooper() != mBgLooper) {
             throw new IllegalStateException("Cache accessed on wrong thread " + Looper.myLooper());
         }
+    }
+
+    /** Log to Log.d. Subclasses can override this method to log persistently for debugging. */
+    protected void logdPersistently(String tag, String message, @Nullable Exception e) {
+        Log.d(tag, message, e);
     }
 }
